@@ -34,7 +34,6 @@ library(lubridate)
 library(ComplexHeatmap)
 ```
 
-
 Here I 1.) load the data 2.) change the gene identifiers from ensemble ids to symbols, where this is possible (otherwise I leave the ensembl id in place) 3.) load the metadata 4.) I put the data and metadata into a Seurat object. 5.) I also load mitochondrial mouse genes from a database for later use.
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE}
 directory = '/home/jovyan/axonGrowth/'
@@ -48,7 +47,7 @@ rownames(axonGrowth_counts) = symbols
 #sum(unlist(lapply(1:dim(axonGrowth_counts)[1], function(x) substring(rownames(axonGrowth_counts)[x], 1,3))) != 'ENS')/dim(axonGrowth_counts)[1]
 metadata = read_xlsx('Summary-neurons_microcoverslips_RNAseq.xlsx', col_types = c('text', 'text', 'date', 'date', 'date', 'date', 'date', rep('text', 7)), skip = 1)
 metadata = metadata[10:105,]
-axonGrowth = CreateSeuratObject(counts = axonGrowth_counts, project = 'axonGrowth', min.cells = 0, min.features = 0)
+axonGrowth = CreateSeuratObject(axonGrowth_counts, project = 'axonGrowth', min.cells = 0, min.features = 0)
 axonGrowth$TotalNeuriteLength = as.numeric(metadata$`Total Neurite Length (um)`)
 axonGrowth$LongestNeuriteLength = as.numeric(metadata$`Longest Neurite Length (um)`)
 axonGrowth$TimeSincePlating = unlist(lapply(1:dim(metadata)[1], function(x) interval(ymd_hms(metadata$`Time of plating (mm/dd/yyyy hh:mm)`[x]), ymd_hms(metadata$`Cell collection time (mm/dd/yyyy hh:mm)`[x]))/dhours(1)))
@@ -65,15 +64,16 @@ VlnPlot(axonGrowth, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), nc
 plot1 <- FeatureScatter(axonGrowth, feature1 = "nCount_RNA", feature2 = "percent.mt")
 plot2 <- FeatureScatter(axonGrowth, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 CombinePlots(plots = list(plot1, plot2))
-axonGrowth <- subset(axonGrowth, subset = nFeature_RNA > 1000 & nFeature_RNA < 20000 & percent.mt < 2.5 & nCount_RNA > 10^5 & nCount_RNA < 10^6)
+axonGrowth <- subset(axonGrowth, subset = nFeature_RNA > 10000 & nFeature_RNA < 20000 & percent.mt < 2.5 & nCount_RNA > 10^5 & nCount_RNA < 10^6)
+VlnPlot(axonGrowth, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 
 ```
 
-The following normalizes, scales and select 200 particularly variable genes. Doing the downstream analysis with only the 200 most variable genes seems like a waste of information. However, given we only have 85 high quality cells available for this analysis at the moment, it will give us the most robust clustering results. 
+The following normalizes, scales and select 1000 particularly variable genes. Doing the downstream analysis with only the 1000 most variable genes seems like a waste of information. However, given we only have 85 high quality cells available for this analysis at the moment, it will give us the most robust clustering results. 
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
 axonGrowth <- NormalizeData(axonGrowth, normalization.method = "LogNormalize", scale.factor = 10000)
-axonGrowth <- FindVariableFeatures(axonGrowth, selection.method = "vst", nfeatures = 200)
+axonGrowth <- FindVariableFeatures(axonGrowth, selection.method = "vst", nfeatures = 1000)
 top25 <- head(VariableFeatures(axonGrowth), 25)
 plot1 <- VariableFeaturePlot(axonGrowth)
 plot2 <- LabelPoints(plot = plot1, points = top25, repel = TRUE)
@@ -93,7 +93,7 @@ DimHeatmap(axonGrowth, dims = 1, cells = round(dim(axonGrowth)[2])/2, balanced =
 DimHeatmap(axonGrowth, dims = 1:15, cells = round(dim(axonGrowth)[2])/2, balanced = TRUE)
 ```
 
-Based on the JackStraw procedure I select 6 PCs for further analysis:
+Based on the JackStraw procedure I select 12 PCs for further analysis:
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
 axonGrowth <- JackStraw(axonGrowth, num.replicate = 100)
@@ -105,7 +105,7 @@ ElbowPlot(axonGrowth, ndims = 40)
 This is the clustering step:
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
-axonGrowth <- FindNeighbors(axonGrowth, dims = 1:6)
+axonGrowth <- FindNeighbors(axonGrowth, dims = 1:12)
 axonGrowth <- FindClusters(axonGrowth, resolution = 0.5)
 head(Idents(axonGrowth), 5)
 ```
@@ -113,7 +113,7 @@ head(Idents(axonGrowth), 5)
 Clusters roughly agree with visual seperation on a UMAP plot:
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
-axonGrowth <- RunUMAP(axonGrowth, dims = 1:6)
+axonGrowth <- RunUMAP(axonGrowth, dims = 1:12)
 DimPlot(axonGrowth, reduction = "umap")
 saveRDS(axonGrowth, file = "axonGrowth_SeuratTutorial.rds")
 ```
@@ -141,11 +141,12 @@ For the dataset we have clustering might not be the best option to discover inte
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
 FeaturePlot(axonGrowth, features = c('TotalNeuriteLength', 'LongestNeuriteLength'))
+FeaturePlot(axonGrowth, features = c('Gfap', 'Mapt'))
 
-correlationScores = data.frame(matrix(0,6,7))
+correlationScores = data.frame(matrix(0,12,7))
 colnames(correlationScores) = c('LongestNeuriteLength', 'TotalNeuriteLength', 'TimeSincePlating', 'TimeInAirMem', 'nCount_RNA', 'nFeature_RNA', 'percent.mt')
   
-for (i in 1:6){
+for (i in 1:12){
   correlationScores[i,] = c(cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$LongestNeuriteLength, use = "complete.obs"), cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$TotalNeuriteLength, use = "complete.obs"),
           cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$TimeSincePlating, use = "complete.obs"),cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$TimeInAIRMEM, use = "complete.obs"),
           cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$nCount_RNA, use = "complete.obs"),cor(axonGrowth@reductions$pca@cell.embeddings[,i], axonGrowth$nFeature_RNA, use = "complete.obs"),
@@ -153,16 +154,25 @@ for (i in 1:6){
 }
 
 temp = as.matrix(correlationScores)
-rownames(temp) = paste('PCA', 1:6, sep = ' ')
+rownames(temp) = paste('PCA', 1:12, sep = ' ')
 
 Heatmap(temp, cluster_rows = FALSE)
 ```
 
-Now principal components 2 might show some relationship to our biological variable of interest, while PC1 is dominated by technical factors. Plotting the PC2 score vs. TotalNeuriteLength or LongestNeuriteLength does not show a very convincing relationship:
+Now principal components 1 might show some relationship to our biological variable of interest, while PC1 is dominated by technical factors. Plotting the PC1 score vs. TotalNeuriteLength or LongestNeuriteLength does not show a very convincing relationship:
 
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
-plot(axonGrowth@reductions$pca@cell.embeddings[,2], axonGrowth$TotalNeuriteLength, pch = '.', cex = 3, xlab = 'PCA2-score', ylab = 'TotalNeuriteLength')
-plot(axonGrowth@reductions$pca@cell.embeddings[,2], axonGrowth$LongestNeuriteLength, pch = '.', cex = 3, xlab = 'PCA2-score', ylab = 'LongestNeuriteLength')
+for (gene in c('Gfap', 'Mapt', 'Gap43', 'Tubb3')){
+col_fun <- colorRamp(c("grey", "blue"))
+axonGrowth_counts = cpm(axonGrowth_counts)
+norm = log2(axonGrowth_counts[,names(axonGrowth@reductions$pca@cell.embeddings[,1])][gene,] + 1)
+norm = norm/max(norm)
+rgb_cols <- col_fun(norm)
+cols <- rgb(rgb_cols, maxColorValue = 256)
+
+plot(axonGrowth$TotalNeuriteLength, axonGrowth@reductions$pca@cell.embeddings[,1], col = cols, pch = '.', cex = 10, ylab = 'PCA1-score', xlab = 'TotalNeuriteLength', main = gene)
+plot(axonGrowth$LongestNeuriteLength, axonGrowth@reductions$pca@cell.embeddings[,1], col = cols,  pch = '.', cex = 10, ylab = 'PCA1-score', xlab = 'LongestNeuriteLength', main = gene)
+}
 ```
 
 I save the gene loadings for PC2 below:
@@ -171,7 +181,7 @@ I save the gene loadings for PC2 below:
 write.csv(sort(Loadings(axonGrowth, reduction = 'pca')[,c('PC_2')], decreasing = TRUE), file = 'PC2_loadings.csv')
 ```
 
-Principal component analysis is not optimal for identifying biologically meaningful gene modules in single cell data for two main reasons: 1.) It assumes all noise in the data is normally distributed. 2.) It assumes all gene modules are best described by 'orthogonal' (uncorrelated) dimensions. So in further analysis in the immediate future I will try alternative algorithms that that derive non-orthogonal modules (e.g. https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-9-559) and model noise appropriately (e.g. https://www.embopress.org/doi/full/10.15252/msb.20188557). Such more advanced analysis strategies and possibly more data in the future, should increase our power to discover gene modules associated with neurite growth.
+Principal component analysis is not optimal for identifying biologically meaningful gene modules in single cell data for two main reasons: 1.) It assumes all noise in the data is normally distributed. 2.) It assumes all gene modules are best described by 'orthogonal' (uncorrelated) dimensions. So in further analysis in the immediate future I will try alternative algorithms that that derive non-orthogonal modules (e.g. https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-9-559) and model noise appropriately (e.g. https://www.embopress.org/doi/full/10.15252/msb.20188557). Such more advanced analysis strategies and possibly more data in the future, should increase our power to discover gene modules associated with neurite growth.0.
 
 
 
