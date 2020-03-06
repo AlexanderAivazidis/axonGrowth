@@ -38,7 +38,7 @@ Here I 1.) load the data 2.) change the gene identifiers from ensemble ids to sy
 ```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE}
 directory = '/home/jovyan/axonGrowth/'
 setwd(directory)
-axonGrowth_counts = read.csv('counts.csv', row.names = 1)
+axonGrowth_counts = read.csv('counts (1).csv', row.names = 1)
 rownames(axonGrowth_counts) = unlist(lapply(1:length(rownames(axonGrowth_counts)), function(x) strsplit(rownames(axonGrowth_counts)[x], split = '\\.')[[1]][1]))
 symbols = mapIdsMouse(rownames(axonGrowth_counts), 'ENSEMBL', 'SYMBOL')
 mitogenes <- genes(EnsDb.Mmusculus.v75, filter = ~ seq_name == "MT")$gene_id

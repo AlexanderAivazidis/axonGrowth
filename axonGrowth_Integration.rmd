@@ -1,0 +1,305 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+### Integration with public data
+
+---
+  title: "Finding gene modules that correlate with neurite growth"
+output:
+  html_document: default
+github_document: default
+fig_width: 12
+fig_height: 4 
+---
+  
+```{r include = FALSE}
+### Load data and packages
+knitr::opts_chunk$set(fig.width=24, fig.height=8) 
+
+```
+
+In this script I integrate the mouse neuron data with publically available datasets and compare PCA and WGCNA for gene module discovery.
+
+Load the required R libraries:
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE}
+library(readxl)
+library(dplyr)
+library(Seurat)
+library(myUtils)
+library(EnsDb.Mmusculus.v75)
+library(lubridate)
+library(ComplexHeatmap)
+library(R.matlab)
+library(WGCNA)
+library(biomaRt)
+library(org.Mm.eg.db)
+library(gridExtra)
+library(grid)
+```
+
+Here I 1.) load the data 2.) change the gene identifiers from ensemble ids to symbols, where this is possible (otherwise I leave the ensembl id in place) 3.) load the metadata 4.) I put the data and metadata into a Seurat object. 5.) I also load mitochondrial mouse genes from a database for later use.
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE}
+directory = '/home/jovyan/axonGrowth/'
+setwd(directory)
+axonGrowth_counts = read.csv('counts.csv', row.names = 1)
+rownames(axonGrowth_counts) = unlist(lapply(1:length(rownames(axonGrowth_counts)), function(x) strsplit(rownames(axonGrowth_counts)[x], split = '\\.')[[1]][1]))
+symbols = mapIdsMouse(rownames(axonGrowth_counts), 'ENSEMBL', 'SYMBOL')
+mitogenes <- genes(EnsDb.Mmusculus.v75, filter = ~ seq_name == "MT")$gene_id
+percent.mt = colSums(axonGrowth_counts[rownames(axonGrowth_counts) %in% mitogenes,])/colSums(axonGrowth_counts)
+rownames(axonGrowth_counts) = symbols
+#sum(unlist(lapply(1:dim(axonGrowth_counts)[1], function(x) substring(rownames(axonGrowth_counts)[x], 1,3))) != 'ENS')/dim(axonGrowth_counts)[1]
+metadata = read_xlsx('Summary-neurons_microcoverslips_RNAseq.xlsx', col_types = c('text', 'text', 'date', 'date', 'date', 'date', 'date', rep('text', 7)), skip = 1)
+metadata = metadata[10:105,]
+axonGrowth = CreateSeuratObject(axonGrowth_counts, project = 'axonGrowth', min.cells = 0, min.features = 0)
+axonGrowth$TotalNeuriteLength = as.numeric(metadata$`Total Neurite Length (um)`)
+axonGrowth$LongestNeuriteLength = as.numeric(metadata$`Longest Neurite Length (um)`)
+axonGrowth$TimeSincePlating = unlist(lapply(1:dim(metadata)[1], function(x) interval(ymd_hms(metadata$`Time of plating (mm/dd/yyyy hh:mm)`[x]), ymd_hms(metadata$`Cell collection time (mm/dd/yyyy hh:mm)`[x]))/dhours(1)))
+axonGrowth$TimeSincePlating = unlist(lapply(1:dim(metadata)[1], function(x) interval(ymd_hms(metadata$`Time of plating (mm/dd/yyyy hh:mm)`[x]), ymd_hms(metadata$`Cell collection time (mm/dd/yyyy hh:mm)`[x]))/dhours(1)))
+axonGrowth$TimeInAIRMEM = unlist(lapply(1:dim(metadata)[1], function(x) interval(ymd_hms(metadata$`AIR-MEM change (mm/dd/yyyy hh:mm)`[x]), ymd_hms(metadata$`Cell collection time (mm/dd/yyyy hh:mm)`[x]))/dhours(1)))
+```
+
+The QC plots using number of detected genes, number of counts and percent of counts coming from mitochondrial genes (as a proxy for stress), show a couple of outlier cells, which I remove in the last line:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+
+axonGrowth[["percent.mt"]] <- percent.mt
+VlnPlot(axonGrowth, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1 <- FeatureScatter(axonGrowth, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(axonGrowth, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+axonGrowth <- subset(axonGrowth, subset = nFeature_RNA > 10000 & nFeature_RNA < 20000 & percent.mt < 2.5 & nCount_RNA > 10^5 & nCount_RNA < 10^6)
+VlnPlot(axonGrowth, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+The following normalizes, scales and select 1000 particularly variable genes. Doing the downstream analysis with only the 1000 most variable genes seems like a waste of information. However, given we only have 85 high quality cells available for this analysis at the moment, it will give us the most robust clustering results. 
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+axonGrowth <- NormalizeData(axonGrowth, normalization.method = "LogNormalize", scale.factor = 10000)
+axonGrowth <- FindVariableFeatures(axonGrowth, selection.method = "vst", nfeatures = 1000)
+top25 <- head(VariableFeatures(axonGrowth), 25)
+plot1 <- VariableFeaturePlot(axonGrowth)
+plot2 <- LabelPoints(plot = plot1, points = top25, repel = TRUE)
+CombinePlots(plots = list(plot1, plot2))
+all.genes <- rownames(axonGrowth)
+axonGrowth <- ScaleData(axonGrowth, features = all.genes)
+```
+
+These are the results of the PCA analysis:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+axonGrowth <- RunPCA(axonGrowth, features = VariableFeatures(object = axonGrowth))
+print(axonGrowth[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(axonGrowth, dims = 1:2, reduction = "pca")
+DimPlot(axonGrowth, reduction = "pca")
+DimHeatmap(axonGrowth, dims = 1, cells = round(dim(axonGrowth)[2])/2, balanced = TRUE)
+DimHeatmap(axonGrowth, dims = 1:15, cells = round(dim(axonGrowth)[2])/2, balanced = TRUE)
+```
+
+Based on the JackStraw procedure I select 12 PCs for further analysis:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+axonGrowth <- JackStraw(axonGrowth, num.replicate = 100)
+axonGrowth <- ScoreJackStraw(axonGrowth, dims = 1:20)
+JackStrawPlot(axonGrowth, dims = 1:20)
+ElbowPlot(axonGrowth, ndims = 40)
+n_components = 12
+```
+
+Let's load the data from https://science.sciencemag.org/content/360/6385/176 as a reference:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+reference = readMat('/home/jovyan/data/developingMouse/GSM3017261_150000_CNS_nuclei.mat')
+```
+
+We focus on hippocampal neurons from the mouse brain:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+region = unlist(lapply(reference$cluster.assignment, function(x) strsplit(x, split = ' ')[[1]][2]))
+
+subset = which(region == 'HIPP')
+
+reference$DGE = reference$DGE[subset,]
+reference$barcodes = reference$barcodes[subset]
+reference$cluster.assignment = reference$cluster.assignment[subset]
+reference$sample.type = reference$sample.type[subset]
+reference$genes = trimws(reference$genes)
+subset_genes = which(reference$genes %in% rownames(axonGrowth))
+reference$genes = reference$genes[subset_genes]
+reference$DGE = reference$DGE[,subset_genes]
+
+reference_matrix = as.matrix(reference$DGE)
+reference_matrix = t(reference_matrix)
+rownames(reference_matrix) = reference$genes
+colnames(reference_matrix) = reference$barcodes
+
+reference$DGE = NULL
+
+Reference = CreateSeuratObject(reference_matrix)
+
+Reference <- NormalizeData(Reference, verbose = FALSE)
+Reference <- FindVariableFeatures(Reference, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+```
+
+Now we integrate the two datasets using the method provided by Seurat (see https://www.sciencedirect.com/science/article/pii/S0092867419305598?via%3Dihub):
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+axonGrowth.anchors <- FindIntegrationAnchors(object.list = list(Reference, axonGrowth), dims = 1:30, verbose = TRUE, k.filter = 77)
+axonGrowth.integrated <- IntegrateData(anchorset = axonGrowth.anchors, dims = 1:30)
+```
+
+Let's vizualize differentiation trajectories with the markers suggested in the reference paper and see how our data relates to the reference data on a UMAP plot:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+
+
+# Run the standard workflow for visualization and clustering
+axonGrowth.integrated <- ScaleData(axonGrowth.integrated, verbose = FALSE)
+axonGrowth.integrated <- RunPCA(axonGrowth.integrated, npcs = 30, verbose = FALSE)
+axonGrowth.integrated <- RunUMAP(axonGrowth.integrated, reduction = "pca", dims = 1:5)
+axonGrowth.integrated$orig.ident[axonGrowth.integrated$orig.ident == 'SeuratProject'] = 'Reference'
+axonGrowth.integrated$orig.ident[axonGrowth.integrated$orig.ident == 'axonGrowth'] = 'Our data'
+
+DimPlot(axonGrowth.integrated, reduction = "umap", group.by = "orig.ident")
+FeaturePlot(axonGrowth.integrated, features = c('Mki67', 'Prox1', 'Dock10', 'Meis2', 'Spock1'))
+FeaturePlot(axonGrowth.integrated, features = c('Mki67', 'Prox1', 'Dock10', 'Meis2', 'Spock1'), cells = colnames(axonGrowth.integrated)[axonGrowth.integrated$orig.ident == 'Our data'])
+
+
+```
+
+Now we find correlated gene modules with WGCNA, see https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/index.html and see to what extent their eigengene correlates with total neurite length and longest neurite length:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+options(stringsAsFactors = FALSE);
+enableWGCNAThreads()
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(t(axonGrowth.integrated@assays$integrated@scale.data), powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+softPower = 5;
+adjacency = adjacency(t(axonGrowth.integrated@assays$integrated@scale.data), power = softPower)
+TOM = TOMsimilarity(adjacency);
+dissTOM = 1-TOM
+geneTree = hclust(as.dist(dissTOM), method = "average");
+# Plot the resulting clustering tree (dendrogram)
+sizeGrWindow(12,9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+labels = FALSE, hang = 0.04);
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 30;
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+deepSplit = 2, pamRespectsDendro = FALSE,
+minClusterSize = minModuleSize);
+table(dynamicMods)
+# Convert numeric lables into colors
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+# Plot the dendrogram and colors underneath
+sizeGrWindow(8,6)
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05,
+main = "Gene dendrogram and module colors")
+
+datTraits = data.frame(TotalNeuriteLength = axonGrowth.integrated$TotalNeuriteLength,
+                       LongestNeuriteLength = axonGrowth.integrated$LongestNeuriteLength)
+
+MEs0 = moduleEigengenes(t(axonGrowth.integrated@assays$integrated@scale.data), dynamicColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+nSamples = dim(axonGrowth.integrated@assays$integrated@scale.data)[2]
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+xLabels = names(datTraits),
+yLabels = names(MEs),
+ySymbols = names(MEs),
+colorLabels = FALSE,
+colors = greenWhiteRed(50),
+textMatrix = textMatrix,
+setStdMargins = FALSE,
+cex.text = 0.5,
+zlim = c(-1,1),
+main = paste("Module-trait relationships"))
+```
+
+Finally let's see how the gene modules relate to the UMAP plot:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+
+axonGrowth.integrated$MEturquoise = MEs$MEturquoise
+axonGrowth.integrated$MEblue = MEs$MEblue
+axonGrowth.integrated$MEbrown = MEs$MEbrown
+axonGrowth.integrated$MEgrey = MEs$MEgrey
+
+FeaturePlot(axonGrowth.integrated, features = c('MEturquoise', 'MEblue', 'MEbrown', 'MEgrey'))
+```
+
+And what go functions they are enriched for:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+library(topGO)
+
+for (module in c('turquoise', 'blue', 'brown', 'grey')){
+  print(module)
+  all_genes = rep(0,dim(axonGrowth.integrated@assays$integrated@scale.data)[1])
+names(all_genes) = rownames(axonGrowth.integrated@assays$integrated@scale.data)
+all_genes[dynamicColors == module] = 1
+GOdata <- new("topGOdata", ontology = "BP", allGenes = all_genes, geneSel = function(p) p < 
+    0.05, description = "Test", annot = annFUN.org, mapping = "org.Mm.eg.db", 
+    ID = "symbol")
+
+resultFisher <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+tab = GenTable(GOdata, classicFisher = resultFisher, topNodes = 10)
+d = as.data.frame(as.matrix(tab[,c(1,2,6)]))
+p = grid.table(d)
+print(p)
+print(d)
+}
+
+```
+
+The 'blue module' is moderately correlated with Neurite Length and enriched for known GO processes involved in neurite growth. The genes contained in this module are printed out below:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+
+print(names(all_genes)[dynamicColors == 'blue'])
+
+```
+
+However, the below plot that shows Longest Neurite Length as a function of this modules eigengene (PC1), shows no clear association between the two:
+
+```{r, include = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.height = 8, fig.width = 16}
+
+plot(axonGrowth.integrated$MEblue, axonGrowth.integrated$TotalNeuriteLength, pch = '.', cex = 10, xlab = 'Blue Module PCA1-score', ylab = 'LongestNeuriteLength')
+
+```
+
